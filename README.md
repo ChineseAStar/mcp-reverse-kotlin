@@ -39,7 +39,7 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.chineseastar:mcp-reverse-kotlin:0.1.0")
+    implementation("com.github.chineseastar:mcp-reverse-kotlin:0.1.2")
 }
 ```
 
@@ -162,11 +162,11 @@ JitPack watches your GitHub repository. When you push a git tag, it automaticall
 4. Serves the built artifacts from its CDN
 
 ```
-git tag v0.1.0
-git push origin v0.1.0     ← that's it!
+git tag 0.1.2
+git push origin 0.1.2     ← that's it!
 ```
 
-Check build status at: `https://jitpack.io/com/github/chineseastar/mcp-reverse-kotlin/v0.1.0`
+Check build status at: `https://jitpack.io/#ChineseAStar/mcp-reverse-kotlin/0.1.2`
 
 ### jitpack.yml
 
