@@ -185,12 +185,12 @@ This tells JitPack to use JDK 21 for building. The compiled bytecode targets JVM
 
 # 2. Commit
 git add gradle.properties
-git commit -m "Release v0.2.0"
+git commit -m "Release 0.2.0"
 git push
 
 # 3. Tag
-git tag v0.2.0
-git push origin v0.2.0
+git tag 0.2.0
+git push origin 0.2.0
 
 # Done. JitPack builds automatically.
 # Check: https://jitpack.io/com/github/chineseastar/mcp-reverse-kotlin/
@@ -198,8 +198,8 @@ git push origin v0.2.0
 
 If you make a mistake, delete the tag and re-tag:
 ```bash
-git tag -d v0.2.0
-git push origin :v0.2.0
+git tag -d 0.2.0
+git push origin :0.2.0
 # ... fix ... then re-tag
 ```
 
