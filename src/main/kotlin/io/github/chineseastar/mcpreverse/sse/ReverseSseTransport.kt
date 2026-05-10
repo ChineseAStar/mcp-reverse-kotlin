@@ -89,7 +89,7 @@ class ReverseSseTransport(
             return
         }
 
-        val url = "${options.acceptorUrl}/sse?serverName=${options.serverName}"
+        val url = "${options.acceptorUrl}/sse?server_name=${options.serverName}"
 
         try {
             val requestBuilder = HttpRequest.newBuilder()
@@ -111,18 +111,35 @@ class ReverseSseTransport(
                 return
             }
 
-            // Extract session ID from response headers (used for subsequent POST routing)
-            val sessionId = response.headers().firstValue("x-session-id").orElse(null)
+            // Session ID: prefer server-assigned, fall back to client-generated
+            val serverSessionId = response.headers().firstValue("x-session-id").orElse(null)
+            val sessionId = serverSessionId
+                ?: "${options.serverName}-${System.currentTimeMillis()}-${(Math.random() * 1e7).toLong()}"
             logger.debug("ReverseSseTransport: sessionId={}", sessionId)
+
+            // Create transport + MCP session immediately (don't wait for endpoint event)
+            val messageUrl = "${options.acceptorUrl}/message?sessionId=$sessionId"
+            val transport = SseServerTransport(
+                messageUrl = messageUrl,
+                sessionId = sessionId,
+                serverName = options.serverName,
+                authToken = options.authToken,
+                httpClient = httpClient,
+                objectMapper = objectMapper,
+                logger = logger,
+            )
+            val session = factory.create(transport)
+            currentSession.set(session)
+            logger.info("ReverseSseTransport: session created for server '{}' (sessionId={})", options.serverName, sessionId)
 
             reconnectManager.reset()
             logger.info("ReverseSseTransport: SSE connected to {}", options.acceptorUrl)
 
+            // Parse incoming SSE events — only 'message' events carry JSON-RPC payloads
             val parser = SseParser { event, data ->
                 when (event) {
-                    "endpoint" -> onEndpoint(factory, data, sessionId)
                     "message" -> onMessage(data)
-                    else -> logger.debug("ReverseSseTransport: unknown SSE event '{}'", event)
+                    else -> logger.debug("ReverseSseTransport: ignoring SSE event '{}'", event)
                 }
             }
 
@@ -144,24 +161,6 @@ class ReverseSseTransport(
         }
     }
 
-    private fun onEndpoint(factory: McpServerSession.Factory, endpointPath: String, sessionId: String?) {
-        val messageUrl = resolveUrl(options.acceptorUrl, endpointPath)
-        logger.info("ReverseSseTransport: endpoint resolved → {}", messageUrl)
-
-        val transport = SseServerTransport(
-            messageUrl = messageUrl,
-            sessionId = sessionId,
-            serverName = options.serverName,
-            authToken = options.authToken,
-            httpClient = httpClient,
-            objectMapper = objectMapper,
-            logger = logger,
-        )
-        val session = factory.create(transport)
-        currentSession.set(session)
-        logger.info("ReverseSseTransport: session created for server '{}'", options.serverName)
-    }
-
     private fun onMessage(rawJson: String) {
         try {
             val mapper = JacksonMcpJsonMapper(objectMapper)
@@ -178,12 +177,5 @@ class ReverseSseTransport(
             logger.info("ReverseSseTransport: reconnecting (attempt {})", attempt)
             startSseConnection()
         }
-    }
-
-    private fun resolveUrl(base: String, path: String): String {
-        if (path.startsWith("http://") || path.startsWith("https://")) return path
-        val baseUri = URI(base)
-        val resolvedPath = if (path.startsWith("/")) path else "/$path"
-        return URI(baseUri.scheme, baseUri.authority, resolvedPath, null, null).toString()
     }
 }
