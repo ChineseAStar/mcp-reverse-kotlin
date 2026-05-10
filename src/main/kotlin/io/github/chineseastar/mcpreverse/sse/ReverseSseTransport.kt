@@ -95,6 +95,8 @@ class ReverseSseTransport(
             val requestBuilder = HttpRequest.newBuilder()
                 .uri(URI(url))
                 .timeout(options.connectionTimeout)
+                .header("X-MCP-Server-Name", options.serverName)
+                .header("Accept", "text/event-stream")
                 .GET()
 
             options.authToken?.let { token ->
@@ -109,12 +111,16 @@ class ReverseSseTransport(
                 return
             }
 
+            // Extract session ID from response headers (used for subsequent POST routing)
+            val sessionId = response.headers().firstValue("x-session-id").orElse(null)
+            logger.debug("ReverseSseTransport: sessionId={}", sessionId)
+
             reconnectManager.reset()
             logger.info("ReverseSseTransport: SSE connected to {}", options.acceptorUrl)
 
             val parser = SseParser { event, data ->
                 when (event) {
-                    "endpoint" -> onEndpoint(factory, data)
+                    "endpoint" -> onEndpoint(factory, data, sessionId)
                     "message" -> onMessage(data)
                     else -> logger.debug("ReverseSseTransport: unknown SSE event '{}'", event)
                 }
@@ -138,11 +144,19 @@ class ReverseSseTransport(
         }
     }
 
-    private fun onEndpoint(factory: McpServerSession.Factory, endpointPath: String) {
+    private fun onEndpoint(factory: McpServerSession.Factory, endpointPath: String, sessionId: String?) {
         val messageUrl = resolveUrl(options.acceptorUrl, endpointPath)
         logger.info("ReverseSseTransport: endpoint resolved → {}", messageUrl)
 
-        val transport = SseServerTransport(messageUrl, httpClient, objectMapper, logger)
+        val transport = SseServerTransport(
+            messageUrl = messageUrl,
+            sessionId = sessionId,
+            serverName = options.serverName,
+            authToken = options.authToken,
+            httpClient = httpClient,
+            objectMapper = objectMapper,
+            logger = logger,
+        )
         val session = factory.create(transport)
         currentSession.set(session)
         logger.info("ReverseSseTransport: session created for server '{}'", options.serverName)

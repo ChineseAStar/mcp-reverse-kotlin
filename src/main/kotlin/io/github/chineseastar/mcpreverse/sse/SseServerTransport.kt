@@ -21,6 +21,9 @@ import java.net.http.HttpResponse
  */
 class SseServerTransport(
     private val messageUrl: String,
+    private val sessionId: String?,
+    private val serverName: String,
+    private val authToken: String?,
     private val httpClient: HttpClient,
     private val objectMapper: ObjectMapper,
     private val logger: ReverseLogger = NoopLogger,
@@ -29,13 +32,16 @@ class SseServerTransport(
     override fun sendMessage(message: McpSchema.JSONRPCMessage): Mono<Void> {
         return Mono.fromCallable {
             val json = objectMapper.writeValueAsString(message)
-            val request = HttpRequest.newBuilder()
+            val requestBuilder = HttpRequest.newBuilder()
                 .uri(URI(messageUrl))
                 .header("Content-Type", "application/json")
+                .header("X-MCP-Server-Name", serverName)
                 .POST(BodyPublishers.ofString(json))
-                .build()
 
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.discarding())
+            sessionId?.let { requestBuilder.header("X-Session-Id", it) }
+            authToken?.let { requestBuilder.header("Authorization", "Bearer $it") }
+
+            val response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.discarding())
             if (response.statusCode() !in 200..299) {
                 logger.warn("SseServerTransport: POST {} returned {}", messageUrl, response.statusCode())
             }
