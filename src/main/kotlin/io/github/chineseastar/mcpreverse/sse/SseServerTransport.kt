@@ -6,12 +6,11 @@ import io.github.chineseastar.mcpreverse.ReverseLogger
 import io.modelcontextprotocol.json.TypeRef
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpServerTransport
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import reactor.core.publisher.Mono
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpRequest.BodyPublishers
-import java.net.http.HttpResponse
 
 /**
  * [McpServerTransport] used on the **internal side** of a reverse MCP
@@ -24,26 +23,34 @@ class SseServerTransport(
     private val sessionId: String?,
     private val serverName: String,
     private val authToken: String?,
-    private val httpClient: HttpClient,
+    private val httpClient: OkHttpClient,
     private val objectMapper: ObjectMapper,
     private val logger: ReverseLogger = NoopLogger,
 ) : McpServerTransport {
 
+    companion object {
+        private val JSON = "application/json; charset=utf-8".toMediaType()
+    }
+
     override fun sendMessage(message: McpSchema.JSONRPCMessage): Mono<Void> {
         return Mono.fromCallable {
             val json = objectMapper.writeValueAsString(message)
-            val requestBuilder = HttpRequest.newBuilder()
-                .uri(URI(messageUrl))
-                .header("Content-Type", "application/json")
+            val requestBuilder = Request.Builder()
+                .url(messageUrl)
                 .header("X-MCP-Server-Name", serverName)
-                .POST(BodyPublishers.ofString(json))
+                .post(json.toRequestBody(JSON))
 
             sessionId?.let { requestBuilder.header("X-Session-Id", it) }
             authToken?.let { requestBuilder.header("Authorization", "Bearer $it") }
 
-            val response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.discarding())
-            if (response.statusCode() !in 200..299) {
-                logger.warn("SseServerTransport: POST {} returned {}", messageUrl, response.statusCode())
+            try {
+                httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        logger.warn("SseServerTransport: POST {} returned {}", messageUrl, response.code)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.error("SseServerTransport: Failed to send message: {}", e.message)
             }
         }.then()
     }
@@ -52,11 +59,11 @@ class SseServerTransport(
         return Mono.fromRunnable {
             try {
                 val disconnectUrl = messageUrl.replaceAfterLast("/message", "disconnect")
-                val request = HttpRequest.newBuilder()
-                    .uri(URI(disconnectUrl))
-                    .POST(BodyPublishers.noBody())
+                val request = Request.Builder()
+                    .url(disconnectUrl)
+                    .post(ByteArray(0).toRequestBody(null))
                     .build()
-                httpClient.send(request, HttpResponse.BodyHandlers.discarding())
+                httpClient.newCall(request).execute().use { /* discarding */ }
             } catch (_: Exception) {
                 // best-effort
             }

@@ -9,47 +9,31 @@ import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper
 import io.modelcontextprotocol.spec.McpSchema
 import io.modelcontextprotocol.spec.McpServerSession
 import io.modelcontextprotocol.spec.McpServerTransportProvider
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
 import reactor.core.publisher.Mono
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Reverse SSE transport provider for the **internal side** (the MCP server
- * behind NAT). Implements [McpServerTransportProvider] so it can be passed
- * directly to `McpServer.sync(this)` or `McpServer.async(this)`.
- *
- * Instead of listening for incoming connections, this provider **actively
- * connects out** to a public [SseAcceptor] via an SSE long-poll. The MCP
- * protocol then runs bidirectionally over this channel.
- *
- * ### Usage:
- * ```kotlin
- * val transport = ReverseSseTransport(
- *     ReverseSseOptions(
- *         acceptorUrl = "http://chat-ai:8080/mcp-reverse",
- *         serverName = "jadx-mcp",
- *         reconnect = ReconnectOptions(enabled = true),
- *     )
- * )
- * val server = McpServer.sync(transport)
- *     .serverInfo(Implementation("jadx-mcp", "1.0"))
- *     .build()
- * ```
- */
 class ReverseSseTransport(
     private val options: ReverseSseOptions,
     private val objectMapper: ObjectMapper = ObjectMapper(),
     private val logger: ReverseLogger = NoopLogger,
 ) : McpServerTransportProvider {
 
-    private val httpClient: HttpClient = HttpClient.newHttpClient()
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(options.connectionTimeout.toMillis(), TimeUnit.MILLISECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS) // SSE needs 0 for infinite stream
+        .build()
+
     private val reconnectManager = ReconnectManager(options.reconnect, logger)
     private val sessionFactoryRef = AtomicReference<McpServerSession.Factory>()
     private val currentSession = AtomicReference<McpServerSession>()
-    private val readerThread = AtomicReference<Thread>()
+    private val currentEventSource = AtomicReference<EventSource>()
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // ── McpServerTransportProvider ─────────────────────────────────
@@ -67,7 +51,7 @@ class ReverseSseTransport(
         return Mono.fromRunnable {
             closed.set(true)
             reconnectManager.cancel()
-            readerThread.get()?.interrupt()
+            currentEventSource.get()?.cancel()
             logger.info("ReverseSseTransport: closed for server '{}'", options.serverName)
         }
     }
@@ -77,13 +61,6 @@ class ReverseSseTransport(
     private fun startSseConnection() {
         if (closed.get()) return
 
-        val thread = Thread(this::runSseLoop, "mcp-reverse-sse-${options.serverName}")
-        thread.isDaemon = true
-        readerThread.set(thread)
-        thread.start()
-    }
-
-    private fun runSseLoop() {
         val factory = sessionFactoryRef.get() ?: run {
             logger.error("ReverseSseTransport: sessionFactory not set")
             return
@@ -91,74 +68,67 @@ class ReverseSseTransport(
 
         val url = "${options.acceptorUrl}/sse?server_name=${options.serverName}"
 
-        try {
-            val requestBuilder = HttpRequest.newBuilder()
-                .uri(URI(url))
-                .timeout(options.connectionTimeout)
-                .header("X-MCP-Server-Name", options.serverName)
-                .header("Accept", "text/event-stream")
-                .GET()
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .header("X-MCP-Server-Name", options.serverName)
+            .header("Accept", "text/event-stream")
+            .get()
 
-            options.authToken?.let { token ->
-                requestBuilder.header("Authorization", "Bearer $token")
+        options.authToken?.let { token ->
+            requestBuilder.header("Authorization", "Bearer $token")
+        }
+
+        val request = requestBuilder.build()
+        val factorySource = EventSources.createFactory(httpClient)
+
+        val eventSourceListener = object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: Response) {
+                // Session ID: prefer server-assigned, fall back to client-generated
+                val serverSessionId = response.header("x-session-id")
+                val sessionId = serverSessionId
+                    ?: "${options.serverName}-${System.currentTimeMillis()}-${(Math.random() * 1e7).toLong()}"
+                logger.debug("ReverseSseTransport: sessionId={}", sessionId)
+
+                val messageUrl = "${options.acceptorUrl}/message?sessionId=$sessionId"
+                val transport = SseServerTransport(
+                    messageUrl = messageUrl,
+                    sessionId = sessionId,
+                    serverName = options.serverName,
+                    authToken = options.authToken,
+                    httpClient = httpClient,
+                    objectMapper = objectMapper,
+                    logger = logger,
+                )
+                val session = factory.create(transport)
+                currentSession.set(session)
+                logger.info("ReverseSseTransport: session created for server '{}' (sessionId={})", options.serverName, sessionId)
+
+                reconnectManager.reset()
+                logger.info("ReverseSseTransport: SSE connected to {}", options.acceptorUrl)
             }
 
-            val response = httpClient.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofLines())
-
-            if (response.statusCode() != 200) {
-                logger.error("ReverseSseTransport: SSE connect returned HTTP {}", response.statusCode())
-                scheduleReconnect()
-                return
-            }
-
-            // Session ID: prefer server-assigned, fall back to client-generated
-            val serverSessionId = response.headers().firstValue("x-session-id").orElse(null)
-            val sessionId = serverSessionId
-                ?: "${options.serverName}-${System.currentTimeMillis()}-${(Math.random() * 1e7).toLong()}"
-            logger.debug("ReverseSseTransport: sessionId={}", sessionId)
-
-            // Create transport + MCP session immediately (don't wait for endpoint event)
-            val messageUrl = "${options.acceptorUrl}/message?sessionId=$sessionId"
-            val transport = SseServerTransport(
-                messageUrl = messageUrl,
-                sessionId = sessionId,
-                serverName = options.serverName,
-                authToken = options.authToken,
-                httpClient = httpClient,
-                objectMapper = objectMapper,
-                logger = logger,
-            )
-            val session = factory.create(transport)
-            currentSession.set(session)
-            logger.info("ReverseSseTransport: session created for server '{}' (sessionId={})", options.serverName, sessionId)
-
-            reconnectManager.reset()
-            logger.info("ReverseSseTransport: SSE connected to {}", options.acceptorUrl)
-
-            // Parse incoming SSE events — only 'message' events carry JSON-RPC payloads
-            val parser = SseParser { event, data ->
-                when (event) {
-                    "message" -> onMessage(data)
-                    else -> logger.debug("ReverseSseTransport: ignoring SSE event '{}'", event)
+            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                when (type) {
+                    "message", null -> onMessage(data)
+                    else -> logger.debug("ReverseSseTransport: ignoring SSE event '{}'", type)
                 }
             }
 
-            response.body().use { lines ->
-                lines.forEach { line -> parser.feed(line) }
-            }
-
-            // Stream ended gracefully
-            logger.info("ReverseSseTransport: SSE stream ended, will reconnect")
-            scheduleReconnect()
-
-        } catch (e: InterruptedException) {
-            logger.info("ReverseSseTransport: reader thread interrupted")
-        } catch (e: Exception) {
-            if (!closed.get()) {
-                logger.error("ReverseSseTransport: SSE error: {}", e.message)
+            override fun onClosed(eventSource: EventSource) {
+                logger.info("ReverseSseTransport: SSE stream ended, will reconnect")
                 scheduleReconnect()
             }
+
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                if (!closed.get()) {
+                    logger.error("ReverseSseTransport: SSE error: {}", t?.message ?: "HTTP ${response?.code}")
+                    scheduleReconnect()
+                }
+            }
         }
+
+        val eventSource = factorySource.newEventSource(request, eventSourceListener)
+        currentEventSource.set(eventSource)
     }
 
     private fun onMessage(rawJson: String) {

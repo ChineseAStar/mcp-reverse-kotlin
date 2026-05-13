@@ -7,9 +7,6 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
@@ -172,7 +169,6 @@ class SimpleHttpServer(
 ) {
     @Volatile
     private var running = false
-    private val httpClient = HttpClient.newHttpClient()
 
     // Track SSE connections using InMemorySseWriter for test assertions
     val writers = ConcurrentLinkedQueue<InMemorySseWriter>()

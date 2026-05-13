@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.2.21"
     `maven-publish`
 }
 
@@ -39,7 +39,11 @@ dependencies {
     compileOnly("io.modelcontextprotocol.sdk:mcp-json-jackson2:1.1.2")
 
     // SLF4J logging facade
-    compileOnly("org.slf4j:slf4j-api:2.0.17")
+    compileOnly("org.slf4j:slf4j-api:2.0.18")
+
+    // OkHttp (Cross-platform HTTP & SSE)
+    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("com.squareup.okhttp3:okhttp-sse:5.3.2")
 
     // Test dependencies
     testImplementation("io.modelcontextprotocol.sdk:mcp-core:1.1.2")
